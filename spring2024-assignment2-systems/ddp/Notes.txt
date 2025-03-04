@@ -1,0 +1,3 @@
+## ToDO
+
+Code the Data Parallel Setup

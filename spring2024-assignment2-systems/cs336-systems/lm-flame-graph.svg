@@ -1,0 +1,2866 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="326" onload="init(evt)" viewBox="0 0 1200 326" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="326.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >CUDA time</text>
+<text id="details" x="10.00" y="309" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="309" > </text>
+<g id="frames">
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_4 (82,713 us., 3.66%)</title><rect x="634.5" y="133" width="43.2" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="637.55" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_27 (13,880 us., 0.61%)</title><rect x="670.5" y="85" width="7.2" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="673.46" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (77,576 us., 3.43%)</title><rect x="246.6" y="69" width="40.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="249.60" y="79.5" >tor..</text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_11 (61,617 us., 2.72%)</title><rect x="290.8" y="133" width="32.1" height="15.0" fill="rgb(210,25,6)" rx="2" ry="2" />
+<text  x="293.76" y="143.5" >nn..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (44,590 us., 1.97%)</title><rect x="908.8" y="53" width="23.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="911.80" y="63.5" >t..</text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_6 (200,935 us., 8.88%)</title><rect x="828.0" y="181" width="104.8" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="831.01" y="191.5" >nn.Module:_T..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_14 (3,084 us., 0.14%)</title><rect x="492.3" y="85" width="1.6" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="495.30" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_15 (1,206 us., 0.05%)</title><rect x="1019.9" y="133" width="0.7" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="1022.94" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_triu_of_type_object_at_0x7f8753796840&gt; (216 us., 0.01%)</title><rect x="634.8" y="85" width="0.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="637.82" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_7 (3,197 us., 0.14%)</title><rect x="380.8" y="85" width="1.6" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="383.77" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_72 (124,474 us., 5.50%)</title><rect x="32.1" y="181" width="64.9" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="35.07" y="191.5" >nn.Modu..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (17,377 us., 0.77%)</title><rect x="612.6" y="53" width="9.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="615.61" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (7,233 us., 0.32%)</title><rect x="1029.4" y="37" width="3.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1032.45" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,103 us., 0.14%)</title><rect x="110.4" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="113.42" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (34,012 us., 1.50%)</title><rect x="649.4" y="69" width="17.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="652.42" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (12,555 us., 0.56%)</title><rect x="1022.9" y="69" width="6.5" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1025.90" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_3 (66,270 us., 2.93%)</title><rect x="598.8" y="133" width="34.6" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="601.79" y="143.5" >nn..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (29,923 us., 1.32%)</title><rect x="975.3" y="37" width="15.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="978.29" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (14,028 us., 0.62%)</title><rect x="767.5" y="69" width="7.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="770.53" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (32,677 us., 1.44%)</title><rect x="845.7" y="69" width="17.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="848.69" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_47 (55,012 us., 2.43%)</title><rect x="990.9" y="85" width="28.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="993.90" y="95.5" >nn..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,531 us., 0.60%)</title><rect x="753.5" y="53" width="7.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="756.55" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (113,722 us., 5.03%)</title><rect x="227.7" y="117" width="59.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="230.75" y="127.5" >torch/..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (213,471 us., 9.44%)</title><rect x="179.2" y="165" width="111.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="182.20" y="175.5" >torch/nn/modu..</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="935.9" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="938.92" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_61 (13,679 us., 0.60%)</title><rect x="206.5" y="85" width="7.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="209.45" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (14,255 us., 0.63%)</title><rect x="308.6" y="53" width="7.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="311.63" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (175,998 us., 7.78%)</title><rect x="462.9" y="165" width="91.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="465.94" y="175.5" >torch/nn/m..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_12 (3,145 us., 0.14%)</title><rect x="471.6" y="85" width="1.6" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="474.59" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (45,676 us., 2.02%)</title><rect x="350.8" y="53" width="23.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="353.76" y="63.5" >t..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (36,573 us., 1.62%)</title><rect x="473.2" y="69" width="19.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="476.23" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_43 (15,385 us., 0.68%)</title><rect x="943.8" y="85" width="8.0" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="946.75" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (42,821 us., 1.89%)</title><rect x="705.3" y="53" width="22.4" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="708.35" y="63.5" >t..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (793 us., 0.04%)</title><rect x="1094.5" y="101" width="0.5" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1097.54" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,937 us., 0.62%)</title><rect x="493.9" y="69" width="7.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="496.91" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (22,495 us., 0.99%)</title><rect x="1118.5" y="69" width="11.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1121.49" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (24,732 us., 1.09%)</title><rect x="1105.6" y="53" width="12.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1108.58" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (513 us., 0.02%)</title><rect x="1022.6" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1025.63" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (834 us., 0.04%)</title><rect x="97.0" y="165" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="100.00" y="175.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (86,606 us., 3.83%)</title><rect x="828.2" y="117" width="45.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="831.21" y="127.5" >torc..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (689 us., 0.03%)</title><rect x="634.0" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="636.97" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (25,772 us., 1.14%)</title><rect x="100.5" y="117" width="13.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="103.50" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_19 (3,106 us., 0.14%)</title><rect x="566.8" y="85" width="1.6" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="569.76" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_3 (152,565 us., 6.74%)</title><rect x="554.7" y="181" width="79.6" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="557.75" y="191.5" >nn.Module..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (143,193 us., 6.33%)</title><rect x="1020.6" y="149" width="74.7" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1023.57" y="159.5" >cs336_ba..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (1,171 us., 0.05%)</title><rect x="633.4" y="117" width="0.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="636.36" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_20 (34,815 us., 1.54%)</title><rect x="568.4" y="85" width="18.1" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="571.38" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_38 (32,677 us., 1.44%)</title><rect x="845.7" y="85" width="17.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="848.69" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (786 us., 0.03%)</title><rect x="1098.0" y="53" width="0.4" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="1101.00" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_10 (770 us., 0.03%)</title><rect x="827.2" y="133" width="0.4" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="830.25" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (213,471 us., 9.44%)</title><rect x="179.2" y="149" width="111.4" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="182.20" y="159.5" >cs336_basics/..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (52,333 us., 2.31%)</title><rect x="1020.8" y="117" width="27.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1023.77" y="127.5" >t..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (36,573 us., 1.62%)</title><rect x="473.2" y="53" width="19.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="476.23" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (246 us., 0.01%)</title><rect x="378.6" y="53" width="0.1" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="381.60" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,244 us., 0.10%)</title><rect x="378.0" y="69" width="1.1" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="380.95" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (97,207 us., 4.30%)</title><rect x="1130.2" y="117" width="50.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1133.22" y="127.5" >torch..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,269 us., 0.14%)</title><rect x="204.7" y="53" width="1.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="207.75" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (200,935 us., 8.88%)</title><rect x="828.0" y="149" width="104.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="831.01" y="159.5" >cs336_basics..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,512 us., 0.60%)</title><rect x="213.6" y="53" width="7.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="216.59" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (635 us., 0.03%)</title><rect x="554.1" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="557.08" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (45,676 us., 2.02%)</title><rect x="350.8" y="37" width="23.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="353.76" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (751 us., 0.03%)</title><rect x="462.5" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="465.55" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (11,885 us., 0.53%)</title><rect x="444.7" y="53" width="6.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="447.66" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (1,177 us., 0.05%)</title><rect x="1189.4" y="101" width="0.6" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1192.39" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (101,398 us., 4.48%)</title><rect x="501.2" y="117" width="52.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="504.18" y="127.5" >torch..</text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (856 us., 0.04%)</title><rect x="115.7" y="69" width="0.5" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="118.74" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,106 us., 0.14%)</title><rect x="108.8" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="111.80" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (779 us., 0.03%)</title><rect x="290.2" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="293.15" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,458 us., 0.59%)</title><rect x="301.6" y="53" width="7.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="304.61" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,276 us., 0.59%)</title><rect x="760.6" y="53" width="6.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="763.60" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (11,964 us., 0.53%)</title><rect x="100.8" y="85" width="6.2" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="103.80" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_49 (11,781 us., 0.52%)</title><rect x="1033.2" y="85" width="6.2" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="1036.22" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,263 us., 0.59%)</title><rect x="831.8" y="37" width="6.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="834.82" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (11,781 us., 0.52%)</title><rect x="1033.2" y="37" width="6.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1036.22" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (11,781 us., 0.52%)</title><rect x="1033.2" y="53" width="6.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1036.22" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (45,519 us., 2.01%)</title><rect x="503.4" y="53" width="23.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="506.35" y="63.5" >t..</text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (266 us., 0.01%)</title><rect x="738.2" y="53" width="0.2" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="741.24" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (11,024 us., 0.49%)</title><rect x="1175.2" y="69" width="5.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1178.18" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (509 us., 0.02%)</title><rect x="105.9" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="108.91" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (691 us., 0.03%)</title><rect x="727.7" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="730.68" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_30 (13,869 us., 0.61%)</title><rect x="746.3" y="85" width="7.2" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="749.31" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (44,590 us., 1.97%)</title><rect x="908.8" y="69" width="23.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="911.80" y="79.5" >t..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (4,293 us., 0.19%)</title><rect x="113.9" y="85" width="2.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="116.94" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,114 us., 0.58%)</title><rect x="316.1" y="37" width="6.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="319.07" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (92,630 us., 4.09%)</title><rect x="179.4" y="117" width="48.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="182.43" y="127.5" >torc..</text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (208 us., 0.01%)</title><rect x="196.3" y="53" width="0.1" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="199.26" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (1,206 us., 0.05%)</title><rect x="1019.9" y="101" width="0.7" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1022.94" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,269 us., 0.14%)</title><rect x="204.7" y="69" width="1.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="207.75" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (16,967 us., 0.75%)</title><rect x="195.9" y="69" width="8.8" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="198.90" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,869 us., 0.61%)</title><rect x="746.3" y="69" width="7.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="749.31" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (100,449 us., 4.44%)</title><rect x="774.8" y="101" width="52.4" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="777.85" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (51,717 us., 2.29%)</title><rect x="527.1" y="53" width="27.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="530.10" y="63.5" >t..</text>
+</g>
+<g >
+<title>nn.Module:_FFN_11 (99,072 us., 4.38%)</title><rect x="322.9" y="133" width="51.7" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="325.91" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (801 us., 0.04%)</title><rect x="1098.7" y="53" width="0.4" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="1101.68" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (72,944 us., 3.22%)</title><rect x="463.1" y="101" width="38.1" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="466.13" y="111.5" >cs3..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (753 us., 0.03%)</title><rect x="374.6" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="377.59" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,103 us., 0.14%)</title><rect x="110.4" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="113.42" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_8 (52,333 us., 2.31%)</title><rect x="1020.8" y="133" width="27.3" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="1023.77" y="143.5" >n..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_2 (690 us., 0.03%)</title><rect x="462.2" y="133" width="0.3" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="465.19" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_5 (648 us., 0.03%)</title><rect x="554.4" y="133" width="0.3" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="557.41" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,632 us., 0.60%)</title><rect x="220.6" y="37" width="7.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="223.64" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_24 (34,012 us., 1.50%)</title><rect x="649.4" y="85" width="17.8" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="652.42" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (11,462 us., 0.51%)</title><rect x="116.2" y="37" width="6.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="119.18" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_55 (9,296 us., 0.41%)</title><rect x="1100.7" y="85" width="4.9" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="1103.73" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_17 (603 us., 0.03%)</title><rect x="1095.0" y="133" width="0.3" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1097.95" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,575 us., 0.60%)</title><rect x="1039.4" y="37" width="7.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1042.36" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (617 us., 0.03%)</title><rect x="178.5" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="181.53" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (1,580 us., 0.07%)</title><rect x="30.0" y="197" width="0.8" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="32.99" y="207.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (793 us., 0.04%)</title><rect x="1094.5" y="117" width="0.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1097.54" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_pow_of_Tensor_object_at_0x7f85f9106200&gt; (255 us., 0.01%)</title><rect x="290.4" y="85" width="0.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="293.42" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (66,270 us., 2.93%)</title><rect x="598.8" y="101" width="34.6" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="601.79" y="111.5" >cs..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_31 (13,531 us., 0.60%)</title><rect x="753.5" y="85" width="7.1" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="756.55" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (486 us., 0.02%)</title><rect x="31.8" y="165" width="0.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="34.78" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,276 us., 0.59%)</title><rect x="760.6" y="37" width="6.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="763.60" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,679 us., 0.60%)</title><rect x="206.5" y="69" width="7.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="209.45" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (61,617 us., 2.72%)</title><rect x="290.8" y="101" width="32.1" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="293.76" y="111.5" >cs..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (51,827 us., 2.29%)</title><rect x="1130.2" y="85" width="27.1" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="1133.22" y="95.5" >c..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_23 (22,409 us., 0.99%)</title><rect x="621.7" y="85" width="11.7" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="624.67" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_21 (779 us., 0.03%)</title><rect x="290.2" y="133" width="0.4" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="293.15" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (36,573 us., 1.62%)</title><rect x="473.2" y="37" width="19.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="476.23" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (99,072 us., 4.38%)</title><rect x="322.9" y="117" width="51.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="325.91" y="127.5" >torch..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (14,255 us., 0.63%)</title><rect x="308.6" y="69" width="7.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="311.63" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (511 us., 0.02%)</title><rect x="1098.4" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="1101.41" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_54 (3,145 us., 0.14%)</title><rect x="1099.1" y="85" width="1.6" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="1102.09" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,145 us., 0.14%)</title><rect x="1099.1" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1102.09" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (11,326 us., 0.50%)</title><rect x="804.8" y="53" width="5.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="807.82" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_13 (36,573 us., 1.62%)</title><rect x="473.2" y="85" width="19.1" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="476.23" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,197 us., 0.14%)</title><rect x="380.8" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="383.77" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="106.6" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="109.64" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,151 us., 0.14%)</title><rect x="300.0" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="302.97" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,365 us., 0.15%)</title><rect x="107.0" y="53" width="1.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="110.04" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (103,322 us., 4.57%)</title><rect x="965.7" y="117" width="53.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="968.70" y="127.5" >torch..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,869 us., 0.61%)</title><rect x="746.3" y="37" width="7.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="749.31" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,937 us., 0.62%)</title><rect x="493.9" y="37" width="7.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="496.91" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (175,998 us., 7.78%)</title><rect x="462.9" y="149" width="91.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="465.94" y="159.5" >cs336_basi..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,151 us., 0.14%)</title><rect x="300.0" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="302.97" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (95,828 us., 4.24%)</title><rect x="677.7" y="117" width="50.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="680.70" y="127.5" >torch..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_8 (691 us., 0.03%)</title><rect x="727.7" y="133" width="0.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="730.68" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (124,474 us., 5.50%)</title><rect x="32.1" y="149" width="64.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="35.07" y="159.5" >torch/n..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (2,220,549 us., 98.16%)</title><rect x="31.7" y="213" width="1158.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="34.65" y="223.5" >torch/nn/modules/module.py(1513):__call_impl</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,114 us., 0.58%)</title><rect x="316.1" y="69" width="6.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="319.07" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,365 us., 0.15%)</title><rect x="107.0" y="37" width="1.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="110.04" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (207 us., 0.01%)</title><rect x="179.5" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="182.47" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (191,006 us., 8.44%)</title><rect x="728.4" y="149" width="99.6" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="731.37" y="159.5" >cs336_basics..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (34,815 us., 1.54%)</title><rect x="568.4" y="37" width="18.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="571.38" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (18,987 us., 0.84%)</title><rect x="227.7" y="85" width="10.0" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="230.75" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (1,206 us., 0.05%)</title><rect x="1019.9" y="117" width="0.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1022.94" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (38,239 us., 1.69%)</title><rect x="1074.6" y="69" width="19.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1077.59" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (603 us., 0.03%)</title><rect x="1095.0" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1097.95" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_41 (44,590 us., 1.97%)</title><rect x="908.8" y="85" width="23.3" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="911.80" y="95.5" >n..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (152,565 us., 6.74%)</title><rect x="554.7" y="149" width="79.6" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="557.75" y="159.5" >cs336_bas..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_64 (17,159 us., 0.76%)</title><rect x="237.7" y="85" width="8.9" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="240.65" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,103 us., 0.14%)</title><rect x="110.4" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="113.42" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (14,190 us., 0.63%)</title><rect x="730.5" y="69" width="7.4" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="733.49" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (18,556 us., 0.82%)</title><rect x="1048.1" y="85" width="9.7" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="1051.07" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (162,505 us., 7.18%)</title><rect x="290.6" y="149" width="84.7" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="293.56" y="159.5" >cs336_bas..</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="196.4" y="53" width="0.2" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="199.37" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,114 us., 0.58%)</title><rect x="316.1" y="53" width="6.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="319.07" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_4 (95,828 us., 4.24%)</title><rect x="677.7" y="133" width="50.0" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="680.70" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (282 us., 0.01%)</title><rect x="649.3" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="652.27" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (779 us., 0.03%)</title><rect x="290.2" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="293.15" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_53 (38,239 us., 1.69%)</title><rect x="1074.6" y="85" width="19.9" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="1077.59" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (34,012 us., 1.50%)</title><rect x="649.4" y="37" width="17.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="652.42" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,280 us., 0.59%)</title><rect x="382.4" y="53" width="7.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="385.44" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (6,318 us., 0.28%)</title><rect x="375.8" y="85" width="3.3" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="378.83" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (275 us., 0.01%)</title><rect x="561.0" y="53" width="0.1" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="564.00" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (181,605 us., 8.03%)</title><rect x="1095.3" y="165" width="94.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1098.27" y="175.5" >torch/nn/mo..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (26,484 us., 1.17%)</title><rect x="598.8" y="85" width="13.8" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="601.79" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (619 us., 0.03%)</title><rect x="728.0" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="731.05" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (250 us., 0.01%)</title><rect x="379.0" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="381.99" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (23,484 us., 1.04%)</title><rect x="586.5" y="53" width="12.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="589.54" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_9 (619 us., 0.03%)</title><rect x="728.0" y="133" width="0.4" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="731.05" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (124,474 us., 5.50%)</title><rect x="32.1" y="133" width="64.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="35.07" y="143.5" >&lt;built-..</text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (215 us., 0.01%)</title><rect x="831.0" y="53" width="0.1" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="834.01" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (123,810 us., 5.47%)</title><rect x="113.9" y="117" width="64.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="116.94" y="127.5" >torch/n..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_65 (77,576 us., 3.43%)</title><rect x="246.6" y="85" width="40.5" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="249.60" y="95.5" >nn...</text>
+</g>
+<g >
+<title>nn.Module:_Linear_18 (10,017 us., 0.44%)</title><rect x="561.5" y="85" width="5.3" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="564.53" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (689 us., 0.03%)</title><rect x="634.0" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="636.97" y="127.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (753 us., 0.03%)</title><rect x="932.4" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="935.43" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (523 us., 0.02%)</title><rect x="934.8" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="937.80" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_10 (213,471 us., 9.44%)</title><rect x="179.2" y="181" width="111.4" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="182.20" y="191.5" >nn.Module:_Tr..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,662 us., 0.16%)</title><rect x="112.0" y="37" width="1.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="115.03" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_37 (13,330 us., 0.59%)</title><rect x="838.7" y="85" width="7.0" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="841.73" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (9,296 us., 0.41%)</title><rect x="1100.7" y="53" width="4.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1103.73" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,165 us., 0.14%)</title><rect x="379.1" y="37" width="1.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="382.12" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (800 us., 0.04%)</title><rect x="936.2" y="53" width="0.4" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="939.18" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (746 us., 0.03%)</title><rect x="503.0" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="505.96" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (100,449 us., 4.44%)</title><rect x="774.8" y="117" width="52.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="777.85" y="127.5" >torch..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (108,055 us., 4.78%)</title><rect x="122.2" y="69" width="56.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="125.16" y="79.5" >torch..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,280 us., 0.59%)</title><rect x="382.4" y="69" width="7.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="385.44" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_40 (31,931 us., 1.41%)</title><rect x="892.1" y="85" width="16.7" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="895.15" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_66 (3,151 us., 0.14%)</title><rect x="300.0" y="85" width="1.6" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="302.97" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (16,214 us., 0.72%)</title><rect x="1180.9" y="117" width="8.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1183.93" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (21,708 us., 0.96%)</title><rect x="450.9" y="69" width="11.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="453.86" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (25,772 us., 1.14%)</title><rect x="100.5" y="101" width="13.4" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="103.50" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,109 us., 0.14%)</title><rect x="667.2" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="670.16" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,679 us., 0.60%)</title><rect x="206.5" y="37" width="7.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="209.45" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (510 us., 0.02%)</title><rect x="470.4" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="473.40" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (102,668 us., 4.54%)</title><rect x="391.1" y="85" width="53.6" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="394.11" y="95.5" >cs336..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (55,012 us., 2.43%)</title><rect x="990.9" y="37" width="28.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="993.90" y="47.5" >&lt;b..</text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (202 us., 0.01%)</title><rect x="106.5" y="53" width="0.1" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="109.54" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (34,356 us., 1.52%)</title><rect x="1157.3" y="69" width="17.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1160.26" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (38,239 us., 1.69%)</title><rect x="1074.6" y="53" width="19.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1077.59" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_2 (175,998 us., 7.78%)</title><rect x="462.9" y="181" width="91.8" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="465.94" y="191.5" >nn.Module:..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (45,519 us., 2.01%)</title><rect x="503.4" y="69" width="23.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="506.35" y="79.5" >t..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (45,676 us., 2.02%)</title><rect x="350.8" y="69" width="23.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="353.76" y="79.5" >t..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (42,821 us., 1.89%)</title><rect x="705.3" y="69" width="22.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="708.35" y="79.5" >t..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_20 (5,907 us., 0.26%)</title><rect x="287.1" y="133" width="3.1" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="290.07" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_28 (48,830 us., 2.16%)</title><rect x="679.9" y="85" width="25.4" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="682.88" y="95.5" >n..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,531 us., 0.60%)</title><rect x="753.5" y="37" width="7.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="756.55" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_46 (29,923 us., 1.32%)</title><rect x="975.3" y="85" width="15.6" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="978.29" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,263 us., 0.59%)</title><rect x="831.8" y="69" width="6.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="834.82" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,120 us., 0.14%)</title><rect x="964.1" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="967.07" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,330 us., 0.15%)</title><rect x="389.4" y="69" width="1.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="392.37" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (1,177 us., 0.05%)</title><rect x="1189.4" y="117" width="0.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1192.39" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,197 us., 0.14%)</title><rect x="380.8" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="383.77" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (168,209 us., 7.44%)</title><rect x="932.8" y="149" width="87.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="935.82" y="159.5" >cs336_basi..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,151 us., 0.14%)</title><rect x="300.0" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="302.97" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,145 us., 0.14%)</title><rect x="1099.1" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1102.09" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (282 us., 0.01%)</title><rect x="299.8" y="53" width="0.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="302.82" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (51,717 us., 2.29%)</title><rect x="527.1" y="69" width="27.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="530.10" y="79.5" >t..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_16 (793 us., 0.04%)</title><rect x="1094.5" y="133" width="0.5" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1097.54" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (6,435 us., 0.28%)</title><rect x="933.2" y="85" width="3.4" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="936.24" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (29,672 us., 1.31%)</title><rect x="375.6" y="117" width="15.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="378.63" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_57 (22,495 us., 0.99%)</title><rect x="1118.5" y="85" width="11.7" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1121.49" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (11,885 us., 0.53%)</title><rect x="444.7" y="37" width="6.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="447.66" y="47.5" ></text>
+</g>
+<g >
+<title>profile_time_pytorchprof.py(68):_forward_pass (2,262,060 us., 100.00%)</title><rect x="10.0" y="245" width="1180.0" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" >profile_time_pytorchprof.py(68):_forward_pass</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (660 us., 0.03%)</title><rect x="1019.6" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1022.60" y="127.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(12):_log_softmax (38,892 us., 1.72%)</title><rect x="11.4" y="213" width="20.3" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="14.37" y="223.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_10 (92,630 us., 4.09%)</title><rect x="179.4" y="133" width="48.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="182.43" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (42,821 us., 1.89%)</title><rect x="705.3" y="37" width="22.4" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="708.35" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (7,233 us., 0.32%)</title><rect x="1029.4" y="53" width="3.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1032.45" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_58 (34,356 us., 1.52%)</title><rect x="1157.3" y="85" width="17.9" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="1160.26" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (29,923 us., 1.32%)</title><rect x="975.3" y="53" width="15.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="978.29" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,880 us., 0.61%)</title><rect x="670.5" y="53" width="7.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="673.46" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (156,741 us., 6.93%)</title><rect x="97.4" y="165" width="81.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="100.44" y="175.5" >torch/nn/..</text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_9 (66,611 us., 2.94%)</title><rect x="1095.5" y="133" width="34.7" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="1098.47" y="143.5" >nn..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (33,433 us., 1.48%)</title><rect x="728.9" y="85" width="17.4" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="731.87" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,880 us., 0.61%)</title><rect x="670.5" y="69" width="7.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="673.46" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_71 (45,676 us., 2.02%)</title><rect x="350.8" y="85" width="23.8" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="353.76" y="95.5" >n..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (72,944 us., 3.22%)</title><rect x="463.1" y="117" width="38.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="466.13" y="127.5" >tor..</text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (227 us., 0.01%)</title><rect x="463.2" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="466.17" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (690 us., 0.03%)</title><rect x="462.2" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="465.19" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_triu_of_type_object_at_0x7f8753796840&gt; (642 us., 0.03%)</title><rect x="828.5" y="85" width="0.3" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="831.47" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (167,943 us., 7.42%)</title><rect x="375.3" y="165" width="87.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="378.33" y="175.5" >torch/nn/m..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,084 us., 0.14%)</title><rect x="492.3" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="495.30" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (687 us., 0.03%)</title><rect x="827.6" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="830.65" y="111.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (15,770 us., 0.70%)</title><rect x="463.4" y="85" width="8.2" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="466.36" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_7 (62,629 us., 2.77%)</title><rect x="933.0" y="133" width="32.7" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="936.03" y="143.5" >nn..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,165 us., 0.14%)</title><rect x="379.1" y="53" width="1.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="382.12" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (13,841 us., 0.61%)</title><rect x="22.7" y="197" width="7.3" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="25.74" y="207.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (673 us., 0.03%)</title><rect x="178.9" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="181.85" y="111.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (704 us., 0.03%)</title><rect x="932.1" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="935.06" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_bool_of_Tensor_object_at_0x7f85f911ff10&gt; (230 us., 0.01%)</title><rect x="555.0" y="85" width="0.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="557.95" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,662 us., 0.16%)</title><rect x="112.0" y="69" width="1.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="115.03" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (671 us., 0.03%)</title><rect x="375.0" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="377.98" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (496 us., 0.02%)</title><rect x="830.4" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="833.40" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_7 (689 us., 0.03%)</title><rect x="634.0" y="133" width="0.3" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="636.97" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (88,691 us., 3.92%)</title><rect x="728.6" y="101" width="46.2" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="731.58" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (648 us., 0.03%)</title><rect x="554.4" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="557.41" y="127.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (690 us., 0.03%)</title><rect x="462.2" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="465.19" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_69 (13,114 us., 0.58%)</title><rect x="316.1" y="85" width="6.8" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="319.07" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_5 (191,006 us., 8.44%)</title><rect x="728.4" y="181" width="99.6" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="731.37" y="191.5" >nn.Module:_T..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (28,647 us., 1.27%)</title><rect x="322.9" y="85" width="15.0" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="325.91" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (99,072 us., 4.38%)</title><rect x="322.9" y="101" width="51.7" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="325.91" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,165 us., 0.14%)</title><rect x="379.1" y="69" width="1.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="382.12" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_6 (1,171 us., 0.05%)</title><rect x="633.4" y="133" width="0.6" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="636.36" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,209 us., 0.14%)</title><rect x="668.8" y="69" width="1.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="671.78" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (14,702 us., 0.65%)</title><rect x="738.6" y="53" width="7.7" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="741.64" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (103,322 us., 4.57%)</title><rect x="965.7" y="101" width="53.9" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="968.70" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (635 us., 0.03%)</title><rect x="554.1" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="557.08" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (223 us., 0.01%)</title><rect x="555.1" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="558.07" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (501 us., 0.02%)</title><rect x="378.7" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="381.73" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,531 us., 0.60%)</title><rect x="753.5" y="69" width="7.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="756.55" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (273 us., 0.01%)</title><rect x="1029.3" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="1032.30" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (11,024 us., 0.49%)</title><rect x="1175.2" y="53" width="5.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1178.18" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_triu_of_type_object_at_0x7f8753796840&gt; (214 us., 0.01%)</title><rect x="100.7" y="85" width="0.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="103.69" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (770 us., 0.03%)</title><rect x="827.2" y="101" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="830.25" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_48 (7,233 us., 0.32%)</title><rect x="1029.4" y="85" width="3.8" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1032.45" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,662 us., 0.16%)</title><rect x="112.0" y="53" width="1.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="115.03" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (123,810 us., 5.47%)</title><rect x="113.9" y="101" width="64.6" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="116.94" y="111.5" >cs336_b..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (55,012 us., 2.43%)</title><rect x="990.9" y="69" width="28.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="993.90" y="79.5" >to..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_70 (24,749 us., 1.09%)</title><rect x="337.9" y="85" width="12.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="340.85" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,120 us., 0.14%)</title><rect x="1046.4" y="53" width="1.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1049.45" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (4,162 us., 0.18%)</title><rect x="501.2" y="85" width="2.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="504.18" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (34,815 us., 1.54%)</title><rect x="568.4" y="69" width="18.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="571.38" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(17):_cross_entropy (41,511 us., 1.84%)</title><rect x="10.0" y="229" width="21.7" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" >c..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (31,931 us., 1.41%)</title><rect x="892.1" y="37" width="16.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="895.15" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (11,885 us., 0.53%)</title><rect x="444.7" y="69" width="6.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="447.66" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (45,519 us., 2.01%)</title><rect x="503.4" y="37" width="23.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="506.35" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_11 (687 us., 0.03%)</title><rect x="827.6" y="133" width="0.4" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="830.65" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (57,467 us., 2.54%)</title><rect x="774.8" y="85" width="30.0" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="777.85" y="95.5" >cs..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (691 us., 0.03%)</title><rect x="727.7" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="730.68" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_8 (13,280 us., 0.59%)</title><rect x="382.4" y="85" width="7.0" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="385.44" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_44 (23,561 us., 1.04%)</title><rect x="951.8" y="85" width="12.3" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="954.78" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_1 (673 us., 0.03%)</title><rect x="178.9" y="133" width="0.3" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="181.85" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (9,296 us., 0.41%)</title><rect x="1100.7" y="37" width="4.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1103.73" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (17,377 us., 0.77%)</title><rect x="612.6" y="69" width="9.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="615.61" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_0 (25,772 us., 1.14%)</title><rect x="100.5" y="133" width="13.4" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="103.50" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_35 (31,656 us., 1.40%)</title><rect x="810.7" y="85" width="16.5" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="813.73" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (704 us., 0.03%)</title><rect x="932.1" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="935.06" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_ones_of_type_object_at_0x7f8753796840&gt; (626 us., 0.03%)</title><rect x="290.9" y="85" width="0.3" height="15.0" fill="rgb(218,62,15)" rx="2" ry="2" />
+<text  x="293.91" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (84,044 us., 3.72%)</title><rect x="555.0" y="101" width="43.8" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="557.95" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (22,409 us., 0.99%)</title><rect x="621.7" y="37" width="11.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="624.67" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_14 (660 us., 0.03%)</title><rect x="1019.6" y="133" width="0.3" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="1022.60" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (23,561 us., 1.04%)</title><rect x="951.8" y="37" width="12.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="954.78" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (31,931 us., 1.41%)</title><rect x="892.1" y="53" width="16.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="895.15" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (753 us., 0.03%)</title><rect x="374.6" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="377.59" y="127.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (16,136 us., 0.71%)</title><rect x="737.9" y="69" width="8.4" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="740.89" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (108,055 us., 4.78%)</title><rect x="122.2" y="37" width="56.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="125.16" y="47.5" >&lt;buil..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_45 (3,120 us., 0.14%)</title><rect x="964.1" y="85" width="1.6" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="967.07" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_4 (180,268 us., 7.97%)</title><rect x="634.3" y="181" width="94.1" height="15.0" fill="rgb(254,227,54)" rx="2" ry="2" />
+<text  x="637.33" y="191.5" >nn.Module:_..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (82,713 us., 3.66%)</title><rect x="634.5" y="101" width="43.2" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="637.55" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,197 us., 0.14%)</title><rect x="380.8" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="383.77" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (264 us., 0.01%)</title><rect x="106.9" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="109.90" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (51,717 us., 2.29%)</title><rect x="527.1" y="37" width="27.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="530.10" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_26 (3,209 us., 0.14%)</title><rect x="668.8" y="85" width="1.7" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="671.78" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_4 (635 us., 0.03%)</title><rect x="554.1" y="133" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="557.08" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (66,270 us., 2.93%)</title><rect x="598.8" y="117" width="34.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="601.79" y="127.5" >to..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,575 us., 0.60%)</title><rect x="1039.4" y="53" width="7.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1042.36" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (22,495 us., 0.99%)</title><rect x="1118.5" y="53" width="11.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1121.49" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_15 (13,937 us., 0.62%)</title><rect x="493.9" y="85" width="7.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="496.91" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (14,255 us., 0.63%)</title><rect x="308.6" y="37" width="7.5" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="311.63" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (11,462 us., 0.51%)</title><rect x="116.2" y="69" width="6.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="119.18" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_1 (136,261 us., 6.02%)</title><rect x="391.1" y="133" width="71.1" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="394.11" y="143.5" >nn.Modul..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (48,830 us., 2.16%)</title><rect x="679.9" y="37" width="25.4" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="682.88" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (519 us., 0.02%)</title><rect x="377.7" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="380.68" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_56 (24,732 us., 1.09%)</title><rect x="1105.6" y="85" width="12.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1108.58" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (22,495 us., 0.99%)</title><rect x="1118.5" y="37" width="11.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1121.49" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_68 (14,255 us., 0.63%)</title><rect x="308.6" y="85" width="7.5" height="15.0" fill="rgb(220,73,17)" rx="2" ry="2" />
+<text  x="311.63" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,330 us., 0.59%)</title><rect x="838.7" y="37" width="7.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="841.73" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (1,771 us., 0.08%)</title><rect x="470.7" y="69" width="0.9" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="473.66" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,209 us., 0.14%)</title><rect x="668.8" y="37" width="1.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="671.78" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_1 (167,943 us., 7.42%)</title><rect x="375.3" y="181" width="87.6" height="15.0" fill="rgb(223,87,20)" rx="2" ry="2" />
+<text  x="378.33" y="191.5" >nn.Module:..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_52 (32,278 us., 1.43%)</title><rect x="1057.8" y="85" width="16.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1060.75" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (716 us., 0.03%)</title><rect x="337.5" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="340.48" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (89,073 us., 3.94%)</title><rect x="1048.1" y="101" width="46.4" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="1051.07" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>nn.Module:_FFN_9 (97,207 us., 4.30%)</title><rect x="1130.2" y="133" width="50.7" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="1133.22" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (210 us., 0.01%)</title><rect x="728.6" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="731.62" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_0 (617 us., 0.03%)</title><rect x="178.5" y="133" width="0.4" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="181.53" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_9 (181,605 us., 8.03%)</title><rect x="1095.3" y="181" width="94.7" height="15.0" fill="rgb(222,79,18)" rx="2" ry="2" />
+<text  x="1098.27" y="191.5" >nn.Module:_..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_50 (13,575 us., 0.60%)</title><rect x="1039.4" y="85" width="7.0" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="1042.36" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,145 us., 0.14%)</title><rect x="471.6" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="474.59" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (191,006 us., 8.44%)</title><rect x="728.4" y="165" width="99.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="731.37" y="175.5" >torch/nn/mod..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,109 us., 0.14%)</title><rect x="667.2" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="670.16" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,145 us., 0.14%)</title><rect x="1099.1" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1102.09" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (17,377 us., 0.77%)</title><rect x="612.6" y="37" width="9.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="615.61" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_BasicsTransformerLM_0 (2,220,549 us., 98.16%)</title><rect x="31.7" y="229" width="1158.3" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="34.65" y="239.5" >nn.Module:_BasicsTransformerLM_0</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,720 us., 0.61%)</title><rect x="936.6" y="69" width="7.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="939.60" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,575 us., 0.60%)</title><rect x="1039.4" y="69" width="7.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1042.36" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (162,505 us., 7.18%)</title><rect x="290.6" y="165" width="84.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="293.56" y="175.5" >torch/nn/..</text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (12,351 us., 0.55%)</title><rect x="189.5" y="69" width="6.4" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="192.45" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_0 (156,741 us., 6.93%)</title><rect x="97.4" y="181" width="81.8" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="100.44" y="191.5" >nn.Module..</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="738.4" y="53" width="0.2" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="741.38" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (32,677 us., 1.44%)</title><rect x="845.7" y="37" width="17.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="848.69" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (4,177 us., 0.18%)</title><rect x="677.7" y="85" width="2.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="680.70" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_2 (101,398 us., 4.48%)</title><rect x="501.2" y="133" width="52.9" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="504.18" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,145 us., 0.14%)</title><rect x="471.6" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="474.59" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (213 us., 0.01%)</title><rect x="1095.5" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="1098.51" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,209 us., 0.14%)</title><rect x="668.8" y="53" width="1.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="671.78" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (834 us., 0.04%)</title><rect x="97.0" y="149" width="0.4" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="100.00" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (558 us., 0.02%)</title><rect x="560.4" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="563.36" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (15,385 us., 0.68%)</title><rect x="943.8" y="37" width="8.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="946.75" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (20,432 us., 0.90%)</title><rect x="862.7" y="53" width="10.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="865.73" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,330 us., 0.15%)</title><rect x="389.4" y="37" width="1.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="392.37" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_7 (103,322 us., 4.57%)</title><rect x="965.7" y="133" width="53.9" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="968.70" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,937 us., 0.62%)</title><rect x="493.9" y="53" width="7.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="496.91" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (35,951 us., 1.59%)</title><rect x="873.4" y="85" width="18.7" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="876.39" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (113,722 us., 5.03%)</title><rect x="227.7" y="101" width="59.4" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="230.75" y="111.5" >cs336_..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_63 (13,632 us., 0.60%)</title><rect x="220.6" y="85" width="7.1" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="223.64" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,458 us., 0.59%)</title><rect x="301.6" y="37" width="7.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="304.61" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_3 (3,662 us., 0.16%)</title><rect x="112.0" y="85" width="1.9" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="115.03" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,330 us., 0.15%)</title><rect x="389.4" y="53" width="1.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="392.37" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_51 (3,120 us., 0.14%)</title><rect x="1046.4" y="85" width="1.7" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1049.45" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_triu_of_type_object_at_0x7f8753796840&gt; (225 us., 0.01%)</title><rect x="728.8" y="85" width="0.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="731.75" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (528 us., 0.02%)</title><rect x="298.6" y="69" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="301.55" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,280 us., 0.59%)</title><rect x="382.4" y="37" width="7.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="385.44" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_embedding_of_type_object_at_0x7f8753796840&gt; (486 us., 0.02%)</title><rect x="31.8" y="117" width="0.2" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="34.78" y="127.5" ></text>
+</g>
+<g >
+<title>all (2,262,061 us., 100%)</title><rect x="10.0" y="277" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (753 us., 0.03%)</title><rect x="932.4" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="935.43" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (112,472 us., 4.97%)</title><rect x="873.4" y="117" width="58.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="876.39" y="127.5" >torch/..</text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (12,386 us., 0.55%)</title><rect x="641.7" y="69" width="6.5" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="644.72" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_7 (168,209 us., 7.44%)</title><rect x="932.8" y="181" width="87.8" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="935.82" y="191.5" >nn.Module:..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (112,472 us., 4.97%)</title><rect x="873.4" y="101" width="58.7" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="876.39" y="111.5" >cs336_..</text>
+</g>
+<g >
+<title>&lt;built-in_method_bool_of_Tensor_object_at_0x7f85f911ff10&gt; (233 us., 0.01%)</title><rect x="634.5" y="85" width="0.2" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="637.55" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (32,278 us., 1.43%)</title><rect x="1057.8" y="53" width="16.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1060.75" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_36 (13,263 us., 0.59%)</title><rect x="831.8" y="85" width="6.9" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="834.82" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (136,261 us., 6.02%)</title><rect x="391.1" y="101" width="71.1" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="394.11" y="111.5" >cs336_ba..</text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_6 (86,606 us., 3.83%)</title><rect x="828.2" y="133" width="45.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="831.21" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_33 (14,028 us., 0.62%)</title><rect x="767.5" y="85" width="7.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="770.53" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_11 (21,708 us., 0.96%)</title><rect x="450.9" y="85" width="11.3" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="453.86" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,084 us., 0.14%)</title><rect x="492.3" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="495.30" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_masked_fill_of_Tensor_object_at_0x7f85f911fd30&gt; (500 us., 0.02%)</title><rect x="1097.4" y="69" width="0.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1100.40" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (24,749 us., 1.09%)</title><rect x="337.9" y="53" width="12.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="340.85" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,106 us., 0.14%)</title><rect x="566.8" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="569.76" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,869 us., 0.61%)</title><rect x="746.3" y="53" width="7.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="749.31" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (89,073 us., 3.94%)</title><rect x="1048.1" y="117" width="46.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1051.07" y="127.5" >torc..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_23 (671 us., 0.03%)</title><rect x="375.0" y="133" width="0.3" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="377.98" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_4 (11,462 us., 0.51%)</title><rect x="116.2" y="85" width="6.0" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="119.18" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (29,923 us., 1.32%)</title><rect x="975.3" y="69" width="15.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="978.29" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,679 us., 0.60%)</title><rect x="206.5" y="53" width="7.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="209.45" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (11,462 us., 0.51%)</title><rect x="116.2" y="53" width="6.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="119.18" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (168,209 us., 7.44%)</title><rect x="932.8" y="165" width="87.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="935.82" y="175.5" >torch/nn/m..</text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_13 (753 us., 0.03%)</title><rect x="932.4" y="133" width="0.4" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="935.43" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (11,326 us., 0.50%)</title><rect x="804.8" y="37" width="5.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="807.82" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (61,617 us., 2.72%)</title><rect x="290.8" y="117" width="32.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="293.76" y="127.5" >to..</text>
+</g>
+<g >
+<title>nn.Module:_FFN_5 (100,449 us., 4.44%)</title><rect x="774.8" y="133" width="52.4" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="777.85" y="143.5" >nn.Mo..</text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (1,691 us., 0.07%)</title><rect x="560.7" y="69" width="0.8" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="563.65" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (143,193 us., 6.33%)</title><rect x="1020.6" y="165" width="74.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1023.57" y="175.5" >torch/nn..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (17,159 us., 0.76%)</title><rect x="237.7" y="53" width="8.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="240.65" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (21,173 us., 0.94%)</title><rect x="1146.2" y="69" width="11.1" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1149.21" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (365 us., 0.02%)</title><rect x="1020.8" y="85" width="0.2" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="1023.83" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (181,605 us., 8.03%)</title><rect x="1095.3" y="149" width="94.7" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1098.27" y="159.5" >cs336_basic..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (31,656 us., 1.40%)</title><rect x="810.7" y="53" width="16.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="813.73" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (1,283 us., 0.06%)</title><rect x="891.5" y="69" width="0.6" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="894.48" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (66,611 us., 2.94%)</title><rect x="1095.5" y="101" width="34.7" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="1098.47" y="111.5" >cs..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,145 us., 0.14%)</title><rect x="471.6" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="474.59" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_16 (45,519 us., 2.01%)</title><rect x="503.4" y="85" width="23.7" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="506.35" y="95.5" >n..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (751 us., 0.03%)</title><rect x="462.5" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="465.55" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/sparse.py(162):_forward (486 us., 0.02%)</title><rect x="31.8" y="149" width="0.2" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="34.78" y="159.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (673 us., 0.03%)</title><rect x="178.9" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="181.85" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (243 us., 0.01%)</title><rect x="471.5" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="474.46" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,106 us., 0.14%)</title><rect x="108.8" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="111.80" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (44,590 us., 1.97%)</title><rect x="908.8" y="37" width="23.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="911.80" y="47.5" >&lt;..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (136,261 us., 6.02%)</title><rect x="391.1" y="117" width="71.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="394.11" y="127.5" >torch/nn..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (23,484 us., 1.04%)</title><rect x="586.5" y="37" width="12.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="589.54" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (200,935 us., 8.88%)</title><rect x="828.0" y="165" width="104.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="831.01" y="175.5" >torch/nn/mod..</text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (708 us., 0.03%)</title><rect x="974.9" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="977.92" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (210 us., 0.01%)</title><rect x="290.8" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="293.81" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (208 us., 0.01%)</title><rect x="933.1" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="936.07" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (48,830 us., 2.16%)</title><rect x="679.9" y="69" width="25.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="682.88" y="79.5" >t..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (15,385 us., 0.68%)</title><rect x="943.8" y="69" width="8.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="946.75" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,106 us., 0.14%)</title><rect x="566.8" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="569.76" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,632 us., 0.60%)</title><rect x="220.6" y="53" width="7.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="223.64" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,276 us., 0.59%)</title><rect x="760.6" y="69" width="6.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="763.60" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (14,028 us., 0.62%)</title><rect x="767.5" y="37" width="7.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="770.53" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_6 (112,472 us., 4.97%)</title><rect x="873.4" y="133" width="58.7" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="876.39" y="143.5" >nn.Mod..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,109 us., 0.14%)</title><rect x="667.2" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="670.16" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_9 (3,330 us., 0.15%)</title><rect x="389.4" y="85" width="1.7" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="392.37" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (660 us., 0.03%)</title><rect x="1019.6" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1022.60" y="111.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,458 us., 0.59%)</title><rect x="301.6" y="69" width="7.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="304.61" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (24,732 us., 1.09%)</title><rect x="1105.6" y="37" width="12.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1108.58" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_1 (3,106 us., 0.14%)</title><rect x="108.8" y="85" width="1.6" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="111.80" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (88,691 us., 3.92%)</title><rect x="728.6" y="117" width="46.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="731.58" y="127.5" >torc..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (77,576 us., 3.43%)</title><rect x="246.6" y="53" width="40.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="249.60" y="63.5" >tor..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,120 us., 0.14%)</title><rect x="1046.4" y="69" width="1.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1049.45" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (10,017 us., 0.44%)</title><rect x="561.5" y="69" width="5.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="564.53" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (11,278 us., 0.50%)</title><rect x="1023.4" y="53" width="5.9" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="1026.42" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (24,749 us., 1.09%)</title><rect x="337.9" y="69" width="12.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="340.85" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_ones_of_type_object_at_0x7f8753796840&gt; (6,294 us., 0.28%)</title><rect x="555.2" y="85" width="3.3" height="15.0" fill="rgb(218,62,15)" rx="2" ry="2" />
+<text  x="558.19" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,751 us., 0.12%)</title><rect x="1097.7" y="69" width="1.4" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1100.66" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (14,028 us., 0.62%)</title><rect x="767.5" y="53" width="7.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="770.53" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_0 (3,365 us., 0.15%)</title><rect x="107.0" y="85" width="1.8" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="110.04" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_19 (1,177 us., 0.05%)</title><rect x="1189.4" y="133" width="0.6" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="1192.39" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (82,713 us., 3.66%)</title><rect x="634.5" y="117" width="43.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="637.55" y="127.5" >torc..</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="649.0" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="652.01" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (11,781 us., 0.52%)</title><rect x="1033.2" y="69" width="6.2" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1036.22" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_FFN_10 (113,722 us., 5.03%)</title><rect x="227.7" y="133" width="59.4" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="230.75" y="143.5" >nn.Mod..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (5,907 us., 0.26%)</title><rect x="287.1" y="117" width="3.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="290.07" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_17 (51,717 us., 2.29%)</title><rect x="527.1" y="85" width="27.0" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="530.10" y="95.5" >n..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,632 us., 0.60%)</title><rect x="220.6" y="69" width="7.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="223.64" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (617 us., 0.03%)</title><rect x="178.5" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="181.53" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (22,409 us., 0.99%)</title><rect x="621.7" y="69" width="11.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="624.67" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (34,356 us., 1.52%)</title><rect x="1157.3" y="37" width="17.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1160.26" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (167,943 us., 7.42%)</title><rect x="375.3" y="149" width="87.6" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="378.33" y="159.5" >cs336_basi..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (11,326 us., 0.50%)</title><rect x="804.8" y="69" width="5.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="807.82" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (15,385 us., 0.68%)</title><rect x="943.8" y="53" width="8.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="946.75" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (108,055 us., 4.78%)</title><rect x="122.2" y="53" width="56.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="125.16" y="63.5" >torch..</text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (259 us., 0.01%)</title><rect x="100.5" y="85" width="0.2" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="103.54" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (1,171 us., 0.05%)</title><rect x="633.4" y="101" width="0.6" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="636.36" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (11,024 us., 0.49%)</title><rect x="1175.2" y="37" width="5.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1178.18" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_6 (3,165 us., 0.14%)</title><rect x="379.1" y="85" width="1.7" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="382.12" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_1 (29,672 us., 1.31%)</title><rect x="375.6" y="133" width="15.5" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="378.63" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (758 us., 0.03%)</title><rect x="1057.4" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1060.36" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,720 us., 0.61%)</title><rect x="936.6" y="37" width="7.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="939.60" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (34,012 us., 1.50%)</title><rect x="649.4" y="53" width="17.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="652.42" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,120 us., 0.14%)</title><rect x="964.1" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="967.07" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_22 (17,377 us., 0.77%)</title><rect x="612.6" y="85" width="9.1" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="615.61" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,512 us., 0.60%)</title><rect x="213.6" y="37" width="7.0" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="216.59" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (48,169 us., 2.13%)</title><rect x="179.6" y="85" width="25.1" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="182.62" y="95.5" >c..</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (1,078 us., 0.05%)</title><rect x="831.1" y="53" width="0.6" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="834.13" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (7,233 us., 0.32%)</title><rect x="1029.4" y="69" width="3.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1032.45" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_8 (143,193 us., 6.33%)</title><rect x="1020.6" y="181" width="74.7" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="1023.57" y="191.5" >nn.Modul..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (13,880 us., 0.61%)</title><rect x="670.5" y="37" width="7.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="673.46" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (17,159 us., 0.76%)</title><rect x="237.7" y="69" width="8.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="240.65" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_3 (84,044 us., 3.72%)</title><rect x="555.0" y="133" width="43.8" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="557.95" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(498):_gelu (18,387 us., 0.81%)</title><rect x="965.7" y="85" width="9.6" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="968.70" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (20,432 us., 0.90%)</title><rect x="862.7" y="69" width="10.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="865.73" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (648 us., 0.03%)</title><rect x="554.4" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="557.41" y="111.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,177 us., 0.10%)</title><rect x="298.8" y="69" width="1.2" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="301.83" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (62,629 us., 2.77%)</title><rect x="933.0" y="101" width="32.7" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="936.03" y="111.5" >cs..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(145):_forward (2,220,549 us., 98.16%)</title><rect x="31.7" y="197" width="1158.3" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="34.65" y="207.5" >cs336_basics/model.py(145):_forward</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (48,830 us., 2.16%)</title><rect x="679.9" y="53" width="25.4" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="682.88" y="63.5" >t..</text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (315 us., 0.01%)</title><rect x="471.0" y="53" width="0.2" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="474.01" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,106 us., 0.14%)</title><rect x="566.8" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="569.76" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (29,672 us., 1.31%)</title><rect x="375.6" y="101" width="15.5" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="378.63" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (21,708 us., 0.96%)</title><rect x="450.9" y="37" width="11.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="453.86" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (152,565 us., 6.74%)</title><rect x="554.7" y="165" width="79.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="557.75" y="175.5" >torch/nn/..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (21,708 us., 0.96%)</title><rect x="450.9" y="53" width="11.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="453.86" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (6,413 us., 0.28%)</title><rect x="1095.7" y="85" width="3.4" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1098.75" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (97,207 us., 4.30%)</title><rect x="1130.2" y="101" width="50.7" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="1133.22" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (13,969 us., 0.62%)</title><rect x="437.4" y="69" width="7.3" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="440.37" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (180,268 us., 7.97%)</title><rect x="634.3" y="165" width="94.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="637.33" y="175.5" >torch/nn/mo..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_5 (108,055 us., 4.78%)</title><rect x="122.2" y="85" width="56.3" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="125.16" y="95.5" >nn.Mo..</text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,120 us., 0.14%)</title><rect x="1046.4" y="37" width="1.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1049.45" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,263 us., 0.59%)</title><rect x="831.8" y="53" width="6.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="834.82" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (5,907 us., 0.26%)</title><rect x="287.1" y="101" width="3.1" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="290.07" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (222 us., 0.01%)</title><rect x="828.3" y="85" width="0.2" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="831.34" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (92,630 us., 4.09%)</title><rect x="179.4" y="101" width="48.3" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="182.43" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (619 us., 0.03%)</title><rect x="728.0" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="731.05" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (31,656 us., 1.40%)</title><rect x="810.7" y="37" width="16.5" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="813.73" y="47.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (124,474 us., 5.50%)</title><rect x="32.1" y="165" width="64.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="35.07" y="175.5" >torch/n..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (23,561 us., 1.04%)</title><rect x="951.8" y="53" width="12.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="954.78" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (34,815 us., 1.54%)</title><rect x="568.4" y="53" width="18.1" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="571.38" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_2 (72,944 us., 3.22%)</title><rect x="463.1" y="133" width="38.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="466.13" y="143.5" >nn...</text>
+</g>
+<g >
+<title>nn.Module:_Linear_25 (3,109 us., 0.14%)</title><rect x="667.2" y="85" width="1.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="670.16" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (687 us., 0.03%)</title><rect x="827.6" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="830.65" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (9,296 us., 0.41%)</title><rect x="1100.7" y="69" width="4.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1103.73" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (726 us., 0.03%)</title><rect x="237.3" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="240.27" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_34 (11,326 us., 0.50%)</title><rect x="804.8" y="85" width="5.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="807.82" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (671 us., 0.03%)</title><rect x="375.0" y="101" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="377.98" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (1,619 us., 0.07%)</title><rect x="30.8" y="197" width="0.9" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="33.81" y="207.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (31,931 us., 1.41%)</title><rect x="892.1" y="69" width="16.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="895.15" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (17,159 us., 0.76%)</title><rect x="237.7" y="37" width="8.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="240.65" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_21 (23,484 us., 1.04%)</title><rect x="586.5" y="85" width="12.3" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="589.54" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (77,576 us., 3.43%)</title><rect x="246.6" y="37" width="40.5" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="249.60" y="47.5" >&lt;bu..</text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (15,570 us., 0.69%)</title><rect x="196.6" y="53" width="8.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="199.63" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (31,656 us., 1.40%)</title><rect x="810.7" y="69" width="16.5" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="813.73" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/functional.py(2127):_embedding (486 us., 0.02%)</title><rect x="31.8" y="133" width="0.2" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="34.78" y="143.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Embedding_0 (486 us., 0.02%)</title><rect x="31.8" y="181" width="0.2" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="34.78" y="191.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(43):_forward (16,214 us., 0.72%)</title><rect x="1180.9" y="101" width="8.5" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1183.93" y="111.5" ></text>
+</g>
+<g >
+<title>nn.Module:_TransformerBlock_11 (162,505 us., 7.18%)</title><rect x="290.6" y="181" width="84.7" height="15.0" fill="rgb(207,11,2)" rx="2" ry="2" />
+<text  x="293.56" y="191.5" >nn.Module..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (5,781 us., 0.26%)</title><rect x="828.8" y="85" width="3.0" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="831.80" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (38,239 us., 1.69%)</title><rect x="1074.6" y="37" width="19.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1077.59" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,269 us., 0.14%)</title><rect x="204.7" y="37" width="1.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="207.75" y="47.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (180,268 us., 7.97%)</title><rect x="634.3" y="149" width="94.1" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="637.33" y="159.5" >cs336_basic..</text>
+</g>
+<g >
+<title>nn.Module:_FFN_0 (123,810 us., 5.47%)</title><rect x="113.9" y="133" width="64.6" height="15.0" fill="rgb(208,15,3)" rx="2" ry="2" />
+<text  x="116.94" y="143.5" >nn.Modu..</text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (208 us., 0.01%)</title><rect x="375.7" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="378.67" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_24 (834 us., 0.04%)</title><rect x="97.0" y="181" width="0.4" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="100.00" y="191.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_59 (11,024 us., 0.49%)</title><rect x="1175.2" y="85" width="5.7" height="15.0" fill="rgb(220,73,17)" rx="2" ry="2" />
+<text  x="1178.18" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_32 (13,276 us., 0.59%)</title><rect x="760.6" y="85" width="6.9" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="763.60" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,919 us., 0.13%)</title><rect x="935.1" y="69" width="1.5" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="938.07" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (101,398 us., 4.48%)</title><rect x="501.2" y="101" width="52.9" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="504.18" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_29 (42,821 us., 1.89%)</title><rect x="705.3" y="85" width="22.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="708.35" y="95.5" >n..</text>
+</g>
+<g >
+<title>nn.Module:_Linear_62 (13,512 us., 0.60%)</title><rect x="213.6" y="85" width="7.0" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="216.59" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (549 us., 0.02%)</title><rect x="471.2" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="474.17" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_22 (753 us., 0.03%)</title><rect x="374.6" y="133" width="0.4" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="377.59" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (66,611 us., 2.94%)</title><rect x="1095.5" y="117" width="34.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1098.47" y="127.5" >to..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (86,606 us., 3.83%)</title><rect x="828.2" y="101" width="45.2" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="831.21" y="111.5" >cs33..</text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (32,677 us., 1.44%)</title><rect x="845.7" y="53" width="17.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="848.69" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (62,629 us., 2.77%)</title><rect x="933.0" y="117" width="32.7" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="936.03" y="127.5" >to..</text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,362 us., 0.10%)</title><rect x="648.2" y="69" width="1.2" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="651.19" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (244 us., 0.01%)</title><rect x="831.7" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="834.69" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,720 us., 0.61%)</title><rect x="936.6" y="53" width="7.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="939.60" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (3,106 us., 0.14%)</title><rect x="108.8" y="53" width="1.6" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="111.80" y="63.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (1,653 us., 0.07%)</title><rect x="106.2" y="69" width="0.8" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="109.18" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_67 (13,458 us., 0.59%)</title><rect x="301.6" y="85" width="7.0" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="304.61" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (3,084 us., 0.14%)</title><rect x="492.3" y="37" width="1.6" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="495.30" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_2 (3,103 us., 0.14%)</title><rect x="110.4" y="85" width="1.6" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="113.42" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/nn_utils.py(4):_softmax (2,214 us., 0.10%)</title><rect x="830.7" y="69" width="1.1" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="833.66" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (5,815 us., 0.26%)</title><rect x="558.5" y="85" width="3.0" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="561.50" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_39 (20,432 us., 0.90%)</title><rect x="862.7" y="85" width="10.7" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="865.73" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (770 us., 0.03%)</title><rect x="827.2" y="117" width="0.4" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="830.25" y="127.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (34,356 us., 1.52%)</title><rect x="1157.3" y="53" width="17.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1160.26" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (10,017 us., 0.44%)</title><rect x="561.5" y="37" width="5.3" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="564.53" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_60 (3,269 us., 0.14%)</title><rect x="204.7" y="85" width="1.8" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="207.75" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (32,278 us., 1.43%)</title><rect x="1057.8" y="37" width="16.8" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1060.75" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_12 (704 us., 0.03%)</title><rect x="932.1" y="133" width="0.3" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="935.06" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(334):_forward (95,828 us., 4.24%)</title><rect x="677.7" y="101" width="50.0" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="680.70" y="111.5" >cs336..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,330 us., 0.59%)</title><rect x="838.7" y="69" width="7.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="841.73" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (24,732 us., 1.09%)</title><rect x="1105.6" y="69" width="12.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1108.58" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (32,278 us., 1.43%)</title><rect x="1057.8" y="69" width="16.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1060.75" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_contiguous_of_Tensor_object_at_0x7f85f911fba0&gt; (264 us., 0.01%)</title><rect x="634.7" y="85" width="0.1" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="637.67" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (20,432 us., 0.90%)</title><rect x="862.7" y="37" width="10.7" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="865.73" y="47.5" ></text>
+</g>
+<g >
+<title>nn.Module:_CausalMultiHeadSelfAttention_5 (88,691 us., 3.92%)</title><rect x="728.6" y="133" width="46.2" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="731.58" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>cs336_basics/model.py(443):_forward (52,333 us., 2.31%)</title><rect x="1020.8" y="101" width="27.3" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="1023.77" y="111.5" >c..</text>
+</g>
+<g >
+<title>nn.Module:_FFN_8 (89,073 us., 3.94%)</title><rect x="1048.1" y="133" width="46.4" height="15.0" fill="rgb(206,8,1)" rx="2" ry="2" />
+<text  x="1051.07" y="143.5" >nn.M..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (23,484 us., 1.04%)</title><rect x="586.5" y="69" width="12.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="589.54" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (10,017 us., 0.44%)</title><rect x="561.5" y="53" width="5.3" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="564.53" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_bool_of_Tensor_object_at_0x7f85f911ff10&gt; (234 us., 0.01%)</title><rect x="828.2" y="85" width="0.1" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="831.21" y="95.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (84,044 us., 3.72%)</title><rect x="555.0" y="117" width="43.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="557.95" y="127.5" >torc..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (23,561 us., 1.04%)</title><rect x="951.8" y="69" width="12.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="954.78" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (22,409 us., 0.99%)</title><rect x="621.7" y="53" width="11.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="624.67" y="63.5" ></text>
+</g>
+<g >
+<title>profile_time_pytorchprof.py(91):_&lt;module&gt; (2,262,061 us., 100.00%)</title><rect x="10.0" y="261" width="1180.0" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" >profile_time_pytorchprof.py(91):_&lt;module&gt;</text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (508 us., 0.02%)</title><rect x="561.1" y="53" width="0.3" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="564.14" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (905 us., 0.04%)</title><rect x="935.4" y="53" width="0.5" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="938.45" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,120 us., 0.14%)</title><rect x="964.1" y="69" width="1.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="967.07" y="79.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (603 us., 0.03%)</title><rect x="1095.0" y="117" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1097.95" y="127.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_3 (751 us., 0.03%)</title><rect x="462.5" y="133" width="0.4" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="465.55" y="143.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (16,074 us., 0.71%)</title><rect x="1021.1" y="85" width="8.3" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1024.06" y="95.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(303):_forward (156,741 us., 6.93%)</title><rect x="97.4" y="149" width="81.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="100.44" y="159.5" >cs336_bas..</text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (709 us., 0.03%)</title><rect x="612.2" y="69" width="0.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="615.24" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (16,660 us., 0.74%)</title><rect x="291.3" y="85" width="8.7" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="294.27" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_exp_of_type_object_at_0x7f8753796840&gt; (342 us., 0.02%)</title><rect x="648.8" y="53" width="0.2" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="651.83" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (3,365 us., 0.15%)</title><rect x="107.0" y="69" width="1.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="110.04" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_sum_of_type_object_at_0x7f8753796840&gt; (250 us., 0.01%)</title><rect x="561.4" y="53" width="0.1" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="564.40" y="63.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (13,330 us., 0.59%)</title><rect x="838.7" y="53" width="7.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="841.73" y="63.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_42 (13,720 us., 0.61%)</title><rect x="936.6" y="85" width="7.2" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="939.60" y="95.5" ></text>
+</g>
+<g >
+<title>nn.Module:_RMSNorm_18 (16,214 us., 0.72%)</title><rect x="1180.9" y="133" width="8.5" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="1183.93" y="143.5" ></text>
+</g>
+<g >
+<title>torch/nn/modules/linear.py(115):_forward (55,012 us., 2.43%)</title><rect x="990.9" y="53" width="28.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="993.90" y="63.5" >to..</text>
+</g>
+<g >
+<title>torch/nn/modules/module.py(1513):__call_impl (13,512 us., 0.60%)</title><rect x="213.6" y="69" width="7.0" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="216.59" y="79.5" ></text>
+</g>
+<g >
+<title>cs336_basics/model.py(341):_scaled_dot_product_attention (27,769 us., 1.23%)</title><rect x="634.9" y="85" width="14.5" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="637.93" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (861 us., 0.04%)</title><rect x="679.4" y="69" width="0.5" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="682.43" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_max_of_type_object_at_0x7f8753796840&gt; (500 us., 0.02%)</title><rect x="299.6" y="53" width="0.2" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="302.56" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_function_linear&gt; (24,749 us., 1.09%)</title><rect x="337.9" y="37" width="12.9" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="340.85" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_erf_of_type_object_at_0x7f8753796840&gt; (16,806 us., 0.74%)</title><rect x="796.1" y="69" width="8.7" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="799.06" y="79.5" ></text>
+</g>
+<g >
+<title>nn.Module:_Linear_10 (11,885 us., 0.53%)</title><rect x="444.7" y="85" width="6.2" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="447.66" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;built-in_method_mean_of_Tensor_object_at_0x7f85f911f6a0&gt; (274 us., 0.01%)</title><rect x="289.9" y="85" width="0.2" height="15.0" fill="rgb(212,36,8)" rx="2" ry="2" />
+<text  x="292.94" y="95.5" ></text>
+</g>
+</g>
+</svg>

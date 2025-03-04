@@ -1,0 +1,23 @@
+Metadata-Version: 2.1
+Name: cs336_systems
+Version: 0.0.4.dev0
+Summary: CS336: systems
+Description-Content-Type: text/markdown
+Requires-Dist: regex
+Requires-Dist: torch~=2.2.1
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: HolisticTraceAnalysis@ git+https://github.com/nelson-liu/HolisticTraceAnalysis.git@comm_kernel_fix
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+
+# CS336 Spring 2024 Assignment 2: Systems
+
+Please write your code for assignment 2 in this directory.
+
+To run unit tests (assuming you've followed the setup instructions in [the
+parent directory's README.md](../README.md)):
+
+``` sh
+pytest -v
+```
